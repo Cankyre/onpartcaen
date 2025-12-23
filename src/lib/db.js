@@ -13,7 +13,6 @@ export async function loadDb() {
     });
 
     const dbBytes = await fetch('/stops.sqlite').then(res => res.arrayBuffer());
-    console.log('DB loaded:', dbBytes.byteLength, 'bytes');
     db = new SQL.Database(new Uint8Array(dbBytes));
     
     return db;

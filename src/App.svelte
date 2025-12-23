@@ -124,8 +124,6 @@
   }
 
   function handleToggleLine(lineRef, shiftKey = false) {
-    console.log('[handleToggleLine] START - lineRef:', lineRef, 'shiftKey:', shiftKey, 'current hiddenLines:', hiddenLines);
-    
     const displayRefMap = { '6A': '6', '6B': '6' };
     
     if (shiftKey) {
@@ -157,18 +155,13 @@
         hiddenLines = allLineRefs.filter(ref => ref !== lineRef);
       }
     } else {
-      // Normal click: toggle visibility
-      console.log('[handleToggleLine] Normal click, hiddenLines.includes(' + lineRef + '):', hiddenLines.includes(lineRef));
-      
       if (hiddenLines.includes(lineRef)) {
-        console.log('[handleToggleLine] Removing from hiddenLines');
         hiddenLines = hiddenLines.filter(l => l !== lineRef);
         if (inFocusMode && !focusedLines.includes(lineRef)) {
           // showing a line in focus mode -> include in focusedLines
           focusedLines = [...focusedLines, lineRef];
         }
       } else {
-        console.log('[handleToggleLine] Adding to hiddenLines');
         hiddenLines = [...hiddenLines, lineRef];
         if (inFocusMode) {
           // hiding a line in focus mode -> remove from focusedLines
@@ -187,8 +180,6 @@
       focusedLines = [];
     }
 
-    console.log('[handleToggleLine] END - new hiddenLines:', hiddenLines);
-    
     storeData('hiddenLines', hiddenLines);
     // Force immediate map update to avoid races when toggling rapidly
     if (mapViewRef) {

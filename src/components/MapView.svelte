@@ -120,25 +120,17 @@
   }
 
   function updateLayerVisibility() {
-    console.log('[updateLayerVisibility] Called with hiddenLines:', hiddenLines);
-    console.log('[updateLayerVisibility] loadedGeoJSONs:', Array.from(loadedGeoJSONs.keys()));
-    
     for (const [lineRef, layers] of loadedGeoJSONs.entries()) {
       const isHidden = hiddenLines.includes(lineRef);
       const targetVisibility = isHidden ? 'none' : 'visible';
       
       for (const { layerId } of layers) {
         const layerExists = map.getLayer(layerId);
-        console.log(`[updateLayerVisibility] Layer ${layerId}: exists=${!!layerExists}, target=${targetVisibility}`);
-        
         if (layerExists) {
           const currentVis = map.getLayoutProperty(layerId, 'visibility');
-          console.log(`[updateLayerVisibility] Layer ${layerId} current visibility: ${currentVis}`);
           map.setLayoutProperty(layerId, 'visibility', targetVisibility);
           const newVis = map.getLayoutProperty(layerId, 'visibility');
-          console.log(`[updateLayerVisibility] Layer ${layerId} NEW visibility: ${newVis}`);
         } else {
-          console.error(`[updateLayerVisibility] Layer ${layerId} DOES NOT EXIST in map!`);
         }
       }
     }

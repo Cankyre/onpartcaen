@@ -25,7 +25,7 @@ jobs:
       run: npm ci
 
     - name: Build database and GeoJSON
-      run: npm run build-db
+      run: npm run prebuild
       env:
         NODE_ENV: production
 
