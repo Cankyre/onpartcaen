@@ -299,7 +299,7 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
       <div class="about-content" on:click|stopPropagation>
         <h2>À propos</h2>
         <p><strong>On Part Caen ?</strong></p>
-        <p>Un jeu développé par <a href="https://cankyre.eu">Cankyre</a>.</p>
+        <p>Un jeu développé par <a href="mailto:cankyre@caen.lol">Cankyre</a>.</p>
         <p>Cette application n'est en aucun cas affiliée à <em>Twisto</em> ou <em>RATP Dev</em>.</p>
         <p><strong>Données :</strong> OpenStreetMap via Overpass API</p>
         <p>Fortement inspiré par <a href="https://memory.pour.paris">Memory Pour Paris</a>. Merci.</p>
