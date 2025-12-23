@@ -1,0 +1,29 @@
+[out:json][timeout:360];
+
+// Zone Caen la Mer
+area["name"="Communauté urbaine Caen la Mer"]["boundary"="local_authority"]->.caen;
+
+// Relations de lignes Twisto (bus + tram)
+relation(area.caen)
+  ["type"="route"]
+  ["route"~"bus|tram"]
+  ["operator"~"RATP Dev", i]
+->.routes;
+
+// Ways des lignes (tracés)
+way(r.routes)->.line_ways;
+
+// Arrêts référencés par les lignes
+(
+  node(r.routes)["public_transport"="platform"];
+  node(r.routes)["highway"="bus_stop"];
+  node(r.routes)["railway"="tram_stop"];
+)->.line_stops;
+
+// Sortie finale
+(
+  .routes;
+  .line_ways;
+  .line_stops;
+);
+out body geom;

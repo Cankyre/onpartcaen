@@ -1,0 +1,26 @@
+{
+  "name": "memorypourcaen",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "build-db": "node scripts/build-db-merged.cjs",
+    "prebuild": "npm run build-db"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "node-fetch": "^2.7.0",
+    "pngjs": "^7.0.0",
+    "sqlite3": "^5.1.7",
+    "svelte": "^5.43.8",
+    "vite": "^7.2.4"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "maplibre-gl": "^5.15.0",
+    "sql.js": "^1.13.0"
+  }
+}
