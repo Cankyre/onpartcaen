@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "build-db": "node scripts/build-db-merged.cjs",
+    "build-db": "node scripts/build-db.cjs",
     "prebuild": "npm run build-db"
   },
   "devDependencies": {

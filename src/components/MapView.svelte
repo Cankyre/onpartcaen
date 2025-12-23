@@ -12,6 +12,7 @@
   let mapContainer;
   let map;
   let loadedGeoJSONs = new Map();
+  let visibilityRecheckTimer = null;
 
   onMount(() => {
     map = new maplibregl.Map({
@@ -106,18 +107,44 @@
     if (map && map.loaded() && loadedGeoJSONs.size > 0) {
       hiddenLines;
       updateLayerVisibility();
+      
+      // Schedule a recheck 1 second later to catch any race conditions
+      if (visibilityRecheckTimer) {
+        clearTimeout(visibilityRecheckTimer);
+      }
+      visibilityRecheckTimer = setTimeout(() => {
+        updateLayerVisibility();
+        visibilityRecheckTimer = null;
+      }, 1000);
     }
   }
 
   function updateLayerVisibility() {
+    console.log('[updateLayerVisibility] Called with hiddenLines:', hiddenLines);
+    console.log('[updateLayerVisibility] loadedGeoJSONs:', Array.from(loadedGeoJSONs.keys()));
+    
     for (const [lineRef, layers] of loadedGeoJSONs.entries()) {
       const isHidden = hiddenLines.includes(lineRef);
+      const targetVisibility = isHidden ? 'none' : 'visible';
+      
       for (const { layerId } of layers) {
-        if (map.getLayer(layerId)) {
-          map.setLayoutProperty(layerId, 'visibility', isHidden ? 'none' : 'visible');
+        const layerExists = map.getLayer(layerId);
+        console.log(`[updateLayerVisibility] Layer ${layerId}: exists=${!!layerExists}, target=${targetVisibility}`);
+        
+        if (layerExists) {
+          const currentVis = map.getLayoutProperty(layerId, 'visibility');
+          console.log(`[updateLayerVisibility] Layer ${layerId} current visibility: ${currentVis}`);
+          map.setLayoutProperty(layerId, 'visibility', targetVisibility);
+          const newVis = map.getLayoutProperty(layerId, 'visibility');
+          console.log(`[updateLayerVisibility] Layer ${layerId} NEW visibility: ${newVis}`);
+        } else {
+          console.error(`[updateLayerVisibility] Layer ${layerId} DOES NOT EXIST in map!`);
         }
       }
     }
+    
+    // Force map to repaint
+    map.triggerRepaint();
   }
 
   async function loadLinesGeoJSON() {
@@ -125,7 +152,7 @@
     const activeLines = lines.filter(line => activeNetworks.includes(line.network));
     const displayRefMap = { '6A': '6', '6B': '6' };
 
-    // Remove layers for inactive lines
+    // Remove layers for inactive lines (network changed)
     for (const lineRef of Array.from(loadedGeoJSONs.keys())) {
       const isActive = activeLines.some(l => (displayRefMap[l.ref] || l.ref) === lineRef);
       if (!isActive) {
@@ -138,42 +165,48 @@
       }
     }
 
-    // Load new active lines (single file per displayRef)
+    // Load new active lines
     for (const line of activeLines) {
       const displayRef = displayRefMap[line.ref] || line.ref;
-      if (loadedGeoJSONs.has(displayRef)) continue;
+      
+      // Load if not already loaded
+      if (!loadedGeoJSONs.has(displayRef)) {
+        try {
+          const response = await fetch(`/geo/lines/${displayRef}.geojson`);
+          if (!response.ok) continue;
 
-      try {
-        const response = await fetch(`/geo/lines/${displayRef}.geojson`);
-        if (!response.ok) continue;
+          const geojson = await response.json();
+          const sourceId = `line-${displayRef}`;
+          const layerId = `line-layer-${displayRef}`;
 
-        const geojson = await response.json();
+          if (!map.getSource(sourceId)) {
+            map.addSource(sourceId, { type: 'geojson', data: geojson });
+          }
 
-        const sourceId = `line-${displayRef}`;
-        const layerId = `line-layer-${displayRef}`;
-
-        if (!map.getSource(sourceId)) {
-          map.addSource(sourceId, { type: 'geojson', data: geojson });
-
-          map.addLayer({
-            id: layerId,
-            type: 'line',
-            source: sourceId,
-            layout: { 'line-join': 'round', 'line-cap': 'round' },
-            paint: {
-              'line-color': line.color_hex || '#888888',
-              'line-width': 2.5,
-              'line-opacity': 0.8,
-              'line-blur': 0
-            }
-          }, 'stops-unfound');
+          if (!map.getLayer(layerId)) {
+            map.addLayer({
+              id: layerId,
+              type: 'line',
+              source: sourceId,
+              layout: { 'line-join': 'round', 'line-cap': 'round' },
+              paint: {
+                'line-color': line.color_hex || '#888888',
+                'line-width': 2.5,
+                'line-opacity': 0.8,
+                'line-blur': 0
+              }
+            }, 'stops-unfound');
+          }
 
           loadedGeoJSONs.set(displayRef, [{ layerId, sourceId }]);
+        } catch (error) {
+          console.warn(`Could not load GeoJSON for line ${displayRef}:`, error);
         }
-      } catch (error) {
-        console.warn(`Could not load GeoJSON for line ${line.ref} (display ${displayRef}):`, error);
       }
     }
+    
+    // Update visibility for all loaded layers
+    updateLayerVisibility();
   }
 
   // Reactive updates when stops, foundStopIds or activeNetworks change
@@ -220,6 +253,14 @@
       type: 'FeatureCollection',
       features
     });
+  }
+
+  export function setHiddenLines(newHidden) {
+    hiddenLines = Array.isArray(newHidden) ? newHidden.slice() : [];
+    if (map) {
+      updateLayerVisibility();
+      updateStopsLayer();
+    }
   }
 
   export function centerOnStop(stopId) {

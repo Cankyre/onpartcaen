@@ -9,6 +9,8 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   export let activeNetworks = [];
   export let lines = [];
   export let hiddenLines = [];
+  export let focusedLines = [];
+  export let inFocusMode = false;
   export let onStopClick = null;
   export let onClearProgress = null;
   export let onToggleLine = null;
@@ -36,10 +38,29 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
     return idx >= 0 ? idx : 999;
   }
 
+  // Determine which lines are actually visible
+  $: visibleLineRefs = (() => {
+    const allLineRefs = lines
+      .filter(line => activeNetworks.includes(line.network))
+      .reduce((acc, line) => {
+        const displayRef = displayRefMap[line.ref] || line.ref;
+        if (!acc.includes(displayRef)) acc.push(displayRef);
+        return acc;
+      }, []);
+    
+    if (inFocusMode) {
+      return focusedLines;
+    } else {
+      return allLineRefs.filter(ref => !hiddenLines.includes(ref));
+    }
+  })();
+
   // Build flat list of found stops with their lines
   $: flatStops = (() => {
     const foundSet = new Set(foundStopIds);
-    const activeStops = allStops.filter(s => activeNetworks.includes(s.network) && foundSet.has(s.id));
+    const activeStops = allStops.filter(s => 
+      activeNetworks.includes(s.network) && foundSet.has(s.id)
+    );
 
     // Build line color/icon map
     const lineMap = new Map();
@@ -50,9 +71,14 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
       }
     }
 
-    // Group stops by normalized name only (not by location to avoid duplicates like "Saint-Pierre")
+    // Group stops by normalized name only, filtering by visible lines
     const stopsMap = new Map();
     for (const stop of activeStops) {
+      const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
+      
+      // Only include stops on visible lines
+      if (!visibleLineRefs.includes(displayRef)) continue;
+      
       const key = stop.name.toLowerCase().trim();
       if (!stopsMap.has(key)) {
         const firstIdx = foundStopIds.indexOf(stop.id);
@@ -66,7 +92,6 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
         });
       }
       const entry = stopsMap.get(key);
-      const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
       entry.lineRefs.add(displayRef);
       // update firstFoundIndex to earliest
       const idx = foundStopIds.indexOf(stop.id);
@@ -85,14 +110,50 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
     } else if (sortMode === 'alpha') {
       arr.sort((a, b) => a.name.localeCompare(b.name));
     } else if (sortMode === 'by-line') {
-      // duplicate per line, flatten and sort by line order then name
-      const expanded = [];
-      for (const s of arr) {
-        for (const lr of s.lineRefs) {
-          const line = lineMap.get(lr);
-          expanded.push({ ...s, singleLine: line, sortKey: `${getLineOrder(lr).toString().padStart(3, '0')}|${s.name}` });
+      // Group all stops (found + not found) by line, then sort by stop ID (route order)
+      const lineStopsMap = new Map();
+      
+      // Get all stops for active networks, filtered by visible lines
+      const allActiveStops = allStops.filter(s => {
+        const displayRef = displayRefMap[s.line_ref] || s.line_ref;
+        return activeNetworks.includes(s.network) && visibleLineRefs.includes(displayRef);
+      });
+      
+      for (const stop of allActiveStops) {
+        const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
+        if (!lineStopsMap.has(displayRef)) {
+          lineStopsMap.set(displayRef, []);
+        }
+        
+        const normalizedName = stop.name.toLowerCase().trim();
+        // Check if already added this stop name for this line
+        const existing = lineStopsMap.get(displayRef).find(s => s.name.toLowerCase().trim() === normalizedName);
+        if (!existing) {
+          lineStopsMap.get(displayRef).push({
+            id: stop.id,
+            name: stop.name,
+            lat: stop.lat,
+            lon: stop.lon,
+            found: foundSet.has(stop.id),
+            singleLine: lineMap.get(displayRef)
+          });
+        } else if (foundSet.has(stop.id)) {
+          existing.found = true;
         }
       }
+      
+      // Sort stops within each line by ID (route order), then flatten
+      const expanded = [];
+      for (const [lineRef, stops] of lineStopsMap.entries()) {
+        stops.sort((a, b) => a.id - b.id);
+        for (const stop of stops) {
+          expanded.push({
+            ...stop,
+            sortKey: `${getLineOrder(lineRef).toString().padStart(3, '0')}`
+          });
+        }
+      }
+      
       expanded.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
       return expanded;
     }
@@ -117,6 +178,33 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
     const total = unique.size;
     const found = Array.from(unique.values()).filter(u => u.found).length;
     return { found, total, percent: total > 0 ? Math.round((found / total) * 100) : 0 };
+  })();
+
+  // Calculate completed lines (all stops found)
+  $: completedLines = (() => {
+    const foundSet = new Set(foundStopIds);
+    const activeStops = allStops.filter(s => activeNetworks.includes(s.network));
+    const lineStopsMap = new Map();
+    
+    for (const stop of activeStops) {
+      const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
+      if (!lineStopsMap.has(displayRef)) {
+        lineStopsMap.set(displayRef, { total: new Set(), found: new Set() });
+      }
+      const normalizedName = stop.name.toLowerCase().trim();
+      lineStopsMap.get(displayRef).total.add(normalizedName);
+      if (foundSet.has(stop.id)) {
+        lineStopsMap.get(displayRef).found.add(normalizedName);
+      }
+    }
+    
+    const completed = [];
+    for (const [lineRef, stats] of lineStopsMap.entries()) {
+      if (stats.total.size > 0 && stats.found.size === stats.total.size) {
+        completed.push(lineRef);
+      }
+    }
+    return completed;
   })();
 
   function handleExport() {
@@ -162,6 +250,12 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   function toggleAbout() {
     showAbout = !showAbout;
   }
+
+  function handleLineClick(lineRef, event) {
+    event.preventDefault();
+    if (onToggleLine) onToggleLine(lineRef, event.shiftKey);
+  }
+
 </script>
 
 <div class="side-view">
@@ -208,6 +302,8 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
         <p>Un jeu développé par <a href="https://cankyre.eu">Cankyre</a>.</p>
         <p>Cette application n'est en aucun cas affiliée à <em>Twisto</em> ou <em>RATP Dev</em>.</p>
         <p><strong>Données :</strong> OpenStreetMap via Overpass API</p>
+        <p>Fortement inspiré par <a href="https://memory.pour.paris">Memory Pour Paris</a>. Merci.</p>
+        <p style="font-size: 2pt">Dédicace à Fabetsol, l'arrêt Guynemer (y'a rien), et à la ligne 33, paix à son âme.</p>
         <button on:click={toggleAbout}>Fermer</button>
       </div>
     </div>
@@ -226,12 +322,16 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
         <button 
           class="line-filter-btn" 
           class:hidden={hiddenLines.includes(line.ref)}
-          on:click={() => onToggleLine && onToggleLine(line.ref)}
-          title="{hiddenLines.includes(line.ref) ? 'Afficher' : 'Masquer'} la ligne {line.ref}"
+          class:isolated={inFocusMode && focusedLines.includes(line.ref)}
+          on:click={(e) => handleLineClick(line.ref, e)}
+          title="{inFocusMode && focusedLines.includes(line.ref) ? 'Shift+Clic pour tout afficher' : 'Clic: masquer/afficher | Shift+Clic: isoler'}"
         >
           <img src={line.icon} alt="Ligne {line.ref}" on:error={(e) => e.target.style.display = 'none'} />
           {#if hiddenLines.includes(line.ref)}
             <span class="eye-slash">👁️‍🗨️</span>
+          {/if}
+          {#if completedLines.includes(line.ref)}
+            <span class="crown">👑</span>
           {/if}
         </button>
       {/each}
@@ -249,13 +349,19 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   <div class="stops-container">
     <ul class="flat-stops-list">
       {#each flatStops as stop}
-        <li>
+        <li class:not-found={sortMode === 'by-line' && !stop.found}>
           <button 
             class="stop-item" 
+            class:not-found={sortMode === 'by-line' && !stop.found}
             on:click={() => onStopClick && onStopClick(stop.id)}
             type="button"
+            disabled={sortMode === 'by-line' && !stop.found}
           >
+          {#if !stop.found && sortMode === 'by-line'}
+            <span class="stop-name not-found-label">Arrêt à trouver</span>
+          {:else}
             <span class="stop-name">{stop.name}</span>
+          {/if}
             <div class="line-icons">
               {#if sortMode === 'by-line' && stop.singleLine}
                 <img src={stop.singleLine.icon} alt="Ligne {stop.singleLine.ref}" class="line-icon-small" on:error={(e) => e.target.style.display = 'none'} />
@@ -472,37 +578,40 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   }
 
   .line-filters {
-    padding: 1rem;
+    padding: 0.5rem;
     background: white;
     border-bottom: 1px solid #e0e0e0;
   }
 
   .line-filters h3 {
-    margin: 0 0 0.75rem 0;
-    font-size: 0.9rem;
+    margin: 0 0 0.4rem 0;
+    font-size: 0.8rem;
     font-weight: 600;
     color: #333;
   }
 
   .line-filter-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
-    gap: 0.5rem;
+    width: 100%;
+    grid-template-columns: repeat(auto-fill, minmax(32px, 1fr));
+    gap: 0.3rem;
   }
 
   .line-filter-btn {
     position: relative;
     width: 100%;
     aspect-ratio: 1;
-    padding: 0.25rem;
-    border: 2px solid #ddd;
+    padding: 0.15rem;
+    border: 1px solid #ddd;
     background: white;
     cursor: pointer;
-    border-radius: 6px;
+    border-radius: 4px;
     transition: all 0.2s;
     display: flex;
     align-items: center;
     justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .line-filter-btn img {
@@ -521,11 +630,46 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
     filter: grayscale(1);
   }
 
+  .line-filter-btn.isolated {
+    border: 2px solid #007bff;
+    box-shadow: 0 0 8px rgba(0, 123, 255, 0.5);
+  }
+
   .line-filter-btn .eye-slash {
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    font-size: 1.2rem;
+    font-size: 1rem;
   }
+
+  .line-filter-btn .crown {
+    position: absolute;
+    top: -10px;
+    right: -4px;
+    font-size: 1rem;
+    transform: rotate(25deg);
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));
+  }
+
+  .stop-item.not-found {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .stop-item.not-found:hover {
+    background: white;
+  }
+
+  .not-found-label {
+    font-size: 0.75rem;
+    color: #999;
+    font-style: italic;
+    margin-left: 0.5rem;
+  }
+
+  li.not-found {
+    opacity: 0.5;
+  }
+
 </style>

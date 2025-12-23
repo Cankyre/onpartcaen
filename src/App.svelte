@@ -14,6 +14,9 @@
   let foundStopIds = [];
   let activeNetworks = [];
   let hiddenLines = [];
+  let focusedLines = []; // Lines visible in focus mode
+  let hiddenLinesBeforeFocus = []; // Hidden lines before entering focus mode
+  let inFocusMode = false;
   let loading = true;
   let mapViewRef;
   let guessInputRef;
@@ -28,6 +31,10 @@
       hiddenLines = storedHiddenLines;
     }
     await loadAndProcessDb();
+    
+    // Update found stops to include all lines at matching stop names when phase changes
+    updateFoundStopsForPhase();
+    
     loading = false;
   });
 
@@ -36,6 +43,38 @@
     allStops = getAllStops();
     lines = getLines();
     activeNetworks = getActiveNetworks(foundStopIds, allStops);
+  }
+
+  // Update found stops to include all active network stops at the same location
+  function updateFoundStopsForPhase() {
+    if (foundStopIds.length === 0) return;
+    
+    const foundSet = new Set(foundStopIds);
+    const foundStopNames = new Set();
+    
+    // Collect all found stop names (normalized)
+    for (const stopId of foundStopIds) {
+      const stop = allStops.find(s => s.id === stopId);
+      if (stop) {
+        foundStopNames.add(stop.name.toLowerCase().trim());
+      }
+    }
+    
+    // Find all stops in active networks matching found names
+    const newFoundIds = [];
+    for (const stop of allStops) {
+      if (activeNetworks.includes(stop.network)) {
+        const normalizedName = stop.name.toLowerCase().trim();
+        if (foundStopNames.has(normalizedName) && !foundSet.has(stop.id)) {
+          newFoundIds.push(stop.id);
+        }
+      }
+    }
+    
+    if (newFoundIds.length > 0) {
+      foundStopIds = [...foundStopIds, ...newFoundIds];
+      storeData('foundStopIds', foundStopIds);
+    }
   }
 
   function handleGuess(event) {
@@ -54,7 +93,14 @@
 
     // Update found stops
     foundStopIds = [...foundStopIds, ...matchedIds];
+    const previousActiveNetworks = [...activeNetworks];
     activeNetworks = getActiveNetworks(foundStopIds, allStops);
+    
+    // If phase changed, update all previously found stops
+    if (previousActiveNetworks.length !== activeNetworks.length) {
+      updateFoundStopsForPhase();
+    }
+    
     storeData('foundStopIds', foundStopIds);
 
     // Show feedback
@@ -77,14 +123,80 @@
     // Pour éviter de tout perdre, on stocke juste foundStopIds vide
   }
 
-  function handleToggleLine(lineRef) {
-    if (hiddenLines.includes(lineRef)) {
-      hiddenLines = hiddenLines.filter(l => l !== lineRef);
+  function handleToggleLine(lineRef, shiftKey = false) {
+    console.log('[handleToggleLine] START - lineRef:', lineRef, 'shiftKey:', shiftKey, 'current hiddenLines:', hiddenLines);
+    
+    const displayRefMap = { '6A': '6', '6B': '6' };
+    
+    if (shiftKey) {
+      // Shift-click behavior
+      if (inFocusMode && focusedLines.includes(lineRef)) {
+        // Shift-click on a focused line: exit focus mode
+        inFocusMode = false;
+        hiddenLines = [...hiddenLinesBeforeFocus];
+        focusedLines = [];
+        hiddenLinesBeforeFocus = [];
+      } else {
+        // Shift-click on non-focused line: enter/change focus mode
+        const allLineRefs = lines
+          .filter(line => activeNetworks.includes(line.network))
+          .reduce((acc, line) => {
+            const displayRef = displayRefMap[line.ref] || line.ref;
+            if (!acc.includes(displayRef)) acc.push(displayRef);
+            return acc;
+          }, []);
+        
+        if (!inFocusMode) {
+          // Entering focus mode: save current hidden lines
+          hiddenLinesBeforeFocus = [...hiddenLines];
+        }
+        
+        inFocusMode = true;
+        focusedLines = [lineRef];
+        // Hide all lines except the focused one
+        hiddenLines = allLineRefs.filter(ref => ref !== lineRef);
+      }
     } else {
-      hiddenLines = [...hiddenLines, lineRef];
+      // Normal click: toggle visibility
+      console.log('[handleToggleLine] Normal click, hiddenLines.includes(' + lineRef + '):', hiddenLines.includes(lineRef));
+      
+      if (hiddenLines.includes(lineRef)) {
+        console.log('[handleToggleLine] Removing from hiddenLines');
+        hiddenLines = hiddenLines.filter(l => l !== lineRef);
+        if (inFocusMode && !focusedLines.includes(lineRef)) {
+          // showing a line in focus mode -> include in focusedLines
+          focusedLines = [...focusedLines, lineRef];
+        }
+      } else {
+        console.log('[handleToggleLine] Adding to hiddenLines');
+        hiddenLines = [...hiddenLines, lineRef];
+        if (inFocusMode) {
+          // hiding a line in focus mode -> remove from focusedLines
+          focusedLines = focusedLines.filter(l => l !== lineRef);
+        }
+      }
     }
+
+    // Ensure focused lines are always visible (not present in hiddenLines)
+    if (focusedLines.length > 0) {
+      hiddenLines = hiddenLines.filter(h => !focusedLines.includes(h));
+    }
+
+    // If not in focus mode, clear focusedLines
+    if (!inFocusMode) {
+      focusedLines = [];
+    }
+
+    console.log('[handleToggleLine] END - new hiddenLines:', hiddenLines);
+    
     storeData('hiddenLines', hiddenLines);
+    // Force immediate map update to avoid races when toggling rapidly
+    if (mapViewRef) {
+      mapViewRef.setHiddenLines(hiddenLines);
+    }
   }
+
+  const displayRefMap = { '6A': '6', '6B': '6' };
 </script>
 
 <main>
@@ -94,7 +206,7 @@
     </div>
   {:else}
     <div class="app">
-      <div class="top-bar">
+      <div class="floating-input">
         <GuessInput 
           bind:this={guessInputRef}
           on:submit={handleGuess} 
@@ -118,6 +230,8 @@
             {activeNetworks}
             {lines}
             {hiddenLines}
+            {focusedLines}
+            {inFocusMode}
             onStopClick={handleStopClick}
             onClearProgress={handleClearProgress}
             onToggleLine={handleToggleLine}
@@ -155,12 +269,17 @@
     flex-direction: column;
     height: 100vh;
     width: 100vw;
+    position: relative;
   }
 
-  .top-bar {
-    background: white;
-    border-bottom: 2px solid #e0e0e0;
-    z-index: 100;
+  .floating-input {
+    position: fixed;
+    top: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    width: 90%;
+    max-width: 500px;
   }
 
   .main-content {

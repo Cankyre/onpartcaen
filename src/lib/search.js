@@ -7,8 +7,6 @@
 export function normalizeString(str) {
   if (!str) return '';
   
-  const cityNames = ['caen', 'herouville', 'herouville saint clair', 'mondeville', 'ifs', 'fleury sur orne', 'cormelles le royal'];
-  
   let normalized = str
     .toLowerCase()
     .normalize('NFD')
@@ -16,11 +14,6 @@ export function normalizeString(str) {
     .replace(/-/g, ' ') // Replace hyphens with spaces
     .replace(/\s+/g, ' ') // Reduce multiple spaces
     .trim();
-  
-  // Remove city names
-  for (const city of cityNames) {
-    normalized = normalized.replace(new RegExp(`\\b${city}\\b`, 'g'), '').trim();
-  }
   
   return normalized.replace(/\s+/g, ' ').trim();
 }

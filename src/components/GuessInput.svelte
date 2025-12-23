@@ -36,7 +36,6 @@
       aria-label="Deviner un arrêt"
       autocomplete="off"
     />
-    <button type="submit">Deviner</button>
   </form>
   {#if feedbackMessage}
     <div class="feedback {feedbackType}">
@@ -48,7 +47,6 @@
 <style>
   .guess-input {
     padding: 1.5rem;
-    background: white;
     max-width: 800px;
     margin: 0 auto;
   }
@@ -72,22 +70,6 @@
   input:focus {
     border-color: #007bff;
     box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
-  }
-
-  button {
-    padding: 1rem 2rem;
-    font-size: 1.1rem;
-    border: none;
-    background-color: #007bff;
-    color: white;
-    cursor: pointer;
-    border-radius: 8px;
-    transition: background 0.2s;
-    font-weight: 600;
-  }
-
-  button:hover {
-    background-color: #0056b3;
   }
 
   .feedback {
