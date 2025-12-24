@@ -22,7 +22,7 @@
   let devMode = false;
   let mapViewRef;
   let guessInputRef;
-  let mobileMenuOpen = false;
+  let showAboutMobile = false;
 
   function getLineOrder(ref) {
     if (typeof ref !== 'string') return 9999;
@@ -46,6 +46,54 @@
   $: visibleLines = activeLines
     .filter(line => !hiddenLines.includes(line.ref))
     .sort((a, b) => getLineOrder(a.ref) - getLineOrder(b.ref));
+
+  function calculateMobileProgress() {
+    if (activeLines.length === 0) return 0;
+    const allStopsInActiveLines = new Set();
+    activeLines.forEach(line => {
+      getStopsForLine(line.ref).forEach(s => allStopsInActiveLines.add(s.id));
+    });
+    const foundInActive = foundStopIds.filter(id => allStopsInActiveLines.has(id)).length;
+    return allStopsInActiveLines.size > 0 ? Math.round((foundInActive / allStopsInActiveLines.size) * 100) : 0;
+  }
+
+  function toggleAboutMobile() {
+    showAboutMobile = !showAboutMobile;
+  }
+
+  function handleExportMobile() {
+    const json = JSON.stringify(foundStopIds);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'foundStops.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportMobile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json';
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      try {
+        const data = JSON.parse(text);
+        if (Array.isArray(data)) {
+          storeData('foundStopIds', data);
+          location.reload();
+        } else {
+          alert('Format de fichier invalide.');
+        }
+      } catch (err) {
+        alert('Erreur lors de la lecture du fichier.');
+      }
+    };
+    input.click();
+  }
 
   onMount(async () => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -280,38 +328,69 @@
         </aside>
       </div>
       
-      <!-- Mobile hamburger menu -->
-      <button class="mobile-menu-toggle" on:click={() => mobileMenuOpen = !mobileMenuOpen}>
-        ☰
-      </button>
+      <!-- Mobile compact header (phase progress + actions) -->
+      <div class="mobile-header">
+        <div class="mobile-progress">
+          <div class="progress-circle-small">
+            <svg viewBox="0 0 36 36">
+              <path
+                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                fill="none"
+                stroke="#eee"
+                stroke-width="3"
+              />
+              <path
+                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                fill="none"
+                stroke="#4CAF50"
+                stroke-width="3"
+                stroke-dasharray="{calculateMobileProgress()}, 100"
+              />
+              <text x="18" y="21" text-anchor="middle" font-size="10" font-weight="bold">{calculateMobileProgress()}%</text>
+            </svg>
+          </div>
+          <div class="progress-text-small">
+            <strong>{foundStopIds.length}</strong> arrêts
+          </div>
+        </div>
+        <div class="mobile-actions">
+          <button on:click={handleExportMobile} title="Exporter">💾</button>
+          <button on:click={handleImportMobile} title="Importer">📂</button>
+          <button on:click={handleClearProgress} title="Réinitialiser">🔄</button>
+          <button on:click={toggleAboutMobile} title="À propos">ℹ️</button>
+        </div>
+      </div>
       
-      {#if mobileMenuOpen}
+      {#if showAboutMobile}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="mobile-menu-overlay" on:click={() => mobileMenuOpen = false}>
-          <div class="mobile-menu" on:click|stopPropagation>
-            <SideView 
-              {foundStopIds} 
-              {allStops} 
-              {activeNetworks}
-              {lines}
-              {hiddenLines}
-              {focusedLines}
-              {inFocusMode}
-              onStopClick={(stopId) => { handleStopClick(stopId); mobileMenuOpen = false; }}
-              onClearProgress={handleClearProgress}
-              onToggleLine={handleToggleLine}
-            />
+        <div class="about-modal" on:click={() => showAboutMobile = false}>
+          <div class="about-content" on:click|stopPropagation>
+            <h2>À propos</h2>
+            <p><strong>On Part Caen ?</strong></p>
+            <p>Un jeu développé par <a href="mailto:cankyre@caen.lol">Cankyre</a>.</p>
+            <p>Cette application n'est en aucun cas affiliée à <em>Twisto</em> ou <em>RATP Dev</em>.</p>
+            <p><strong>Données :</strong> GTFS officiel de Twisto.</p>
+            <p>Inspiré par <a href="https://memory.pour.paris">Memory Pour Paris</a>.</p>
+            <button on:click={() => showAboutMobile = false}>Fermer</button>
           </div>
         </div>
       {/if}
       
       <!-- Mobile line ribbon -->
       <div class="mobile-line-ribbon">
-        {#each visibleLines as line}
-          <div class="line-ribbon-item">
+        {#each activeLines.sort((a, b) => getLineOrder(a.ref) - getLineOrder(b.ref)) as line}
+          <button 
+            class="line-ribbon-btn"
+            class:hidden={hiddenLines.includes(line.ref)}
+            on:click={(e) => handleToggleLine(line.ref, e.shiftKey)}
+            title="Ligne {line.ref}"
+          >
             <img src="/icons/{line.ref}.png" alt="Ligne {line.ref}" on:error={(e) => e.target.style.display = 'none'} />
-          </div>
+            {#if hiddenLines.includes(line.ref)}
+              <span class="eye-slash-small">👁️</span>
+            {/if}
+          </button>
         {/each}
       </div>
       
@@ -387,69 +466,63 @@
     overflow-y: auto;
   }
 
-  .mobile-menu-toggle {
+  .mobile-header {
     display: none;
-    position: fixed;
-    top: 1rem;
-    right: 1rem;
-    z-index: 1100;
-    width: 50px;
-    height: 50px;
-    border-radius: 50%;
-    border: 2px solid #333;
-    background: white;
-    font-size: 1.5rem;
-    cursor: pointer;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-  }
-
-  .mobile-menu-overlay {
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0,0,0,0.5);
-    z-index: 1200;
-  }
-
-  .mobile-menu {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 80%;
-    max-width: 400px;
-    background: white;
-    overflow-y: auto;
-    box-shadow: -2px 0 8px rgba(0,0,0,0.3);
   }
 
   .mobile-line-ribbon {
     display: none;
+  }
+
+  .about-modal {
     position: fixed;
-    bottom: 80px;
+    top: 0;
     left: 0;
-    right: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+  }
+
+  .about-content {
     background: white;
-    border-top: 2px solid #e0e0e0;
-    overflow-x: auto;
-    white-space: nowrap;
-    padding: 0.5rem;
-    z-index: 999;
-    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+    padding: 2rem;
+    border-radius: 8px;
+    max-width: 400px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    max-height: 80vh;
+    overflow-y: auto;
   }
 
-  .line-ribbon-item {
-    display: inline-block;
-    margin-right: 0.5rem;
+  .about-content h2 {
+    margin: 0 0 1rem 0;
+    font-size: 1.5rem;
+    color: #333;
   }
 
-  .line-ribbon-item img {
-    width: 40px;
-    height: 40px;
-    object-fit: contain;
+  .about-content p {
+    margin: 0.5rem 0;
+    font-size: 0.95rem;
+    color: #666;
+  }
+
+  .about-content button {
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    border: 1px solid #ddd;
+    background: #4CAF50;
+    color: white;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .about-content button:hover {
+    background: #45a049;
   }
 
   @media (max-width: 768px) {
@@ -457,21 +530,125 @@
       display: none;
     }
 
-    .mobile-menu-toggle {
-      display: block;
+    .floating-input {
+      bottom: 0.5rem;
+      width: calc(100% - 1rem);
+      max-width: none;
     }
 
-    .mobile-menu-overlay {
-      display: block;
+    .mobile-header {
+      display: flex;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: white;
+      border-bottom: 2px solid #e0e0e0;
+      padding: 0.5rem;
+      z-index: 1001;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .mobile-progress {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .progress-circle-small {
+      width: 40px;
+      height: 40px;
+      flex-shrink: 0;
+    }
+
+    .progress-circle-small svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .progress-text-small {
+      font-size: 0.85rem;
+      color: #333;
+    }
+
+    .mobile-actions {
+      display: flex;
+      gap: 0.3rem;
+    }
+
+    .mobile-actions button {
+      padding: 0.4rem 0.6rem;
+      border: 1px solid #ddd;
+      background: white;
+      cursor: pointer;
+      border-radius: 4px;
+      font-size: 1rem;
+    }
+
+    .mobile-actions button:hover {
+      background: #f0f0f0;
     }
 
     .mobile-line-ribbon {
-      display: block;
+      display: flex;
+      position: fixed;
+      bottom: 100px;
+      left: 0;
+      right: 0;
+      background: white;
+      border-top: 2px solid #e0e0e0;
+      overflow-x: auto;
+      scrollbar-width: none;
+      white-space: nowrap;
+      padding: 0.5rem;
+      z-index: 1000;
+      box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+      gap: 0.4rem;
     }
 
-    .floating-input {
-      max-width: none;
-      width: calc(100% - 2rem);
+    .line-ribbon-btn {
+      position: relative;
+      width: 40px;
+      height: 40px;
+      padding: 0.2rem;
+      border: 1px solid #ddd;
+      background: white;
+      cursor: pointer;
+      border-radius: 4px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .line-ribbon-btn img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .line-ribbon-btn.hidden {
+      opacity: 0.3;
+      filter: grayscale(1);
+    }
+
+    .eye-slash-small {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 0.9rem;
+    }
+
+    .main-content {
+      padding-top: 60px;
+      padding-bottom: 0;
+    }
+
+    .map-area {
+      height: calc(100vh - 60px - 135px);
     }
   }
 </style>
