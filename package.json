@@ -8,8 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "build-db": "node scripts/build-db.cjs",
-    "build-geojson": "node scripts/fetch-geojson.cjs",
-    "prebuild": "npm run build-db && npm run build-geojson"
+    "prebuild": "npm run build-db"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.1",

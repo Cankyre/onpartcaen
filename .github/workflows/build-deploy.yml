@@ -24,11 +24,6 @@ jobs:
     - name: Install dependencies
       run: npm ci
 
-    - name: Build database and GeoJSON
-      run: npm run prebuild
-      env:
-        NODE_ENV: production
-
     - name: Build site
       run: npm run build
 
