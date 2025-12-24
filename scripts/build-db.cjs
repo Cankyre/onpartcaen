@@ -2,272 +2,233 @@ const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const fetch = require('node-fetch');
+const AdmZip = require('adm-zip');
+const { parse } = require('csv-parse/sync');
+const { fetchLineGeoJSON } = require('./fetch-geojson.cjs');
 
-const overpassQuery = `
-[out:json][timeout:360];
-area["name"="Communauté urbaine Caen la Mer"]["boundary"="local_authority"]->.caen;
-(
-  node(area.caen)["public_transport"="platform"];
-  node(area.caen)["highway"="bus_stop"];
-  node(area.caen)["railway"="tram_stop"];
-)->.caen_stops;
-relation(bn.caen_stops)["type"="route"]["route"~"bus|tram"]->.all_routes;
-(
-  node(r.all_routes)["public_transport"="platform"];
-  node(r.all_routes)["highway"="bus_stop"];
-  node(r.all_routes)["railway"="tram_stop"];
-)->.all_stops;
-(.all_routes; .all_stops;);
-out body;
-`;
-
+// --- CONFIGURATION ---
+const USE_OSM_GEOJSON_FOR = ['T1', 'T2', 'T3', '1', '2', '3', '4', '5', '6A', '6B', '7', '8', '9', '10', '10 EXPRESS', '11', '11 EXPRESS', '12', '20', '21', '22', '23', '30', '31', '32', '34', 'NOCTIBUS', 'NAVETTE CAEN'];
+const GTFS_URL = 'https://data.twisto.fr/api/v2/catalog/datasets/fichier-gtfs-du-reseau-twisto/alternative_exports/gtfs_twisto_zip';
 const DB_PATH = path.join(__dirname, '..', 'public', 'stops.sqlite');
-const OVERPASS_API_URL = 'https://overpass.kumi.systems/api/interpreter';
+const TEMP_GTFS_DIR = path.join(__dirname, 'gtfs_temp');
+// --- END CONFIGURATION ---
 
-async function fetchOverpassData() {
-  console.log('Fetching all routes and stops touching Caen...');
-  const response = await fetch(OVERPASS_API_URL, {
-    method: 'POST',
-    body: `data=${encodeURIComponent(overpassQuery)}`,
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  });
+async function downloadAndUnzipGTFS() {
+    console.log(`Downloading GTFS data from ${GTFS_URL}...`);
+    const response = await fetch(GTFS_URL);
+    if (!response.ok) throw new Error(`Failed to download GTFS data: ${response.statusText}`);
+    const buffer = await response.buffer();
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Overpass API request failed: ${response.statusText}. Body: ${errorText}`);
-  }
-  console.log('Data fetched successfully.');
-  return response.json();
+    console.log('Unzipping GTFS data...');
+    if (fs.existsSync(TEMP_GTFS_DIR)) {
+        fs.rmSync(TEMP_GTFS_DIR, { recursive: true, force: true });
+    }
+    fs.mkdirSync(TEMP_GTFS_DIR);
+
+    const zip = new AdmZip(buffer);
+    zip.extractAllTo(TEMP_GTFS_DIR, true);
+    console.log(`GTFS data extracted to ${TEMP_GTFS_DIR}`);
 }
 
-function getNetworkType(tags) {
-    if (!tags || !tags.ref) return null;
-    if (tags.ref.toUpperCase().startsWith('T')) return 'tram';
-    return 'bus';
+function readGtfsFile(filename) {
+    const filePath = path.join(TEMP_GTFS_DIR, filename);
+    if (!fs.existsSync(filePath)) throw new Error(`GTFS file not found: ${filename}`);
+    const content = fs.readFileSync(filePath);
+    return parse(content, { columns: true, skip_empty_lines: true });
 }
 
-function processData(data) {
-  console.log('Processing data...');
-  
-  const twistoRoutes = data.elements.filter(e => e.type === 'relation' && e.tags.network === 'Twisto');
-  console.log(`Found ${twistoRoutes.length} Twisto route relations.`);
+function normalizeRef(ref) {
+    ref = ref.replace("NVCV", "NAVETTE CAEN").replace("NUIT", "NOCTIBUS")
+    if (['137A', '137B', '138C', '138D'].includes(ref)) return null;
+    if (ref === '6A' || ref === '6B') return '6';
+    const nomadMergeMatch = ref.match(/^(Nomad\s+\d+)[A-Z]?$/i);
+    if (nomadMergeMatch) return nomadMergeMatch[1];
+    const suffixMatch = ref.match(/^(\d+)[A-Z]$/);
+    if (suffixMatch && ref.length > 1 && !ref.startsWith('T')) return suffixMatch[1];
+    return ref;
+}
 
-  const nodes = data.elements.filter(e => e.type === 'node');
-  const stopsMap = new Map(nodes.map(node => [node.id, node]));
-  
-  const dbEntries = [];
-  const stopGroupMap = new Map(); // Track stop groups (multi-quai stops)
-  let stopGroupCounter = 1;
+async function processData() {
+    console.log('Reading GTFS files...');
+    const routes = readGtfsFile('routes.txt');
+    const stops = readGtfsFile('stops.txt');
+    const trips = readGtfsFile('trips.txt');
+    const stopTimes = readGtfsFile('stop_times.txt');
+    const shapes = readGtfsFile('shapes.txt');
+    const calendar = readGtfsFile('calendar.txt');
 
-  // Multi-quai stops to group (customize based on actual data)
-  const multiQuaiStops = {
-    'Théâtre': 1,
-    'Hôtel de Ville': 2,
-    'place courtonne': 3
-  };
-
-  for (const rel of twistoRoutes) {
-    const network = getNetworkType(rel.tags);
-    if (!network || !rel.tags.ref) continue;
-
-    for (const member of rel.members) {
-      if (member.type === 'node' && (member.role === 'platform' || member.role.includes('stop') || member.role === '' )) {
-        const stopNode = stopsMap.get(member.ref);
-        if (stopNode && stopNode.tags && stopNode.tags.name) {
-          
-          const aliases = [
-            stopNode.tags.alt_name,
-            stopNode.tags.short_name,
-            stopNode.tags.official_name,
-            stopNode.tags.name.replace(/Quai \d+/, "") !== stopNode.tags.name ? stopNode.tags.name.replace(/Quai \d+/, "") : undefined
-          ].filter(Boolean);
-
-          const normalizedName = stopNode.tags.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          const stopGroup = multiQuaiStops[normalizedName] || null;
-
-          dbEntries.push({
-            name: stopNode.tags.name,
-            aliases: aliases.join('|'),
-            lat: stopNode.lat,
-            lon: stopNode.lon,
-            line: rel.tags.ref,
-            line_ref: rel.tags.ref,
-            network: network,
-            operator: 'Twisto',
-            stop_group: stopGroup
-          });
+    const osmGeoJsonMap = new Map();
+    if (USE_OSM_GEOJSON_FOR.length > 0) {
+        console.log(`--- Fetching ${USE_OSM_GEOJSON_FOR.length} GeoJSON(s) from OSM ---`);
+        for (const lineRef of USE_OSM_GEOJSON_FOR) {
+            const geojson = await fetchLineGeoJSON(lineRef);
+            if (geojson) osmGeoJsonMap.set(lineRef, geojson);
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      }
+        console.log('--- OSM GeoJSON Fetch Complete ---');
     }
-  }
 
-  const uniqueEntries = Array.from(new Map(dbEntries.map(e => [`${e.name.toLowerCase()}-${e.line.toLowerCase()}`, e])).values());
-  console.log(`Processing complete. Found ${uniqueEntries.length} unique stop-line entries for the Twisto network.`);
-  
-  // Grouper routes par ref pour GeoJSON
-  const routesByRef = new Map();
-  for (const route of twistoRoutes) {
-    if (!route.tags || !route.tags.ref) continue;
-    const ref = route.tags.ref;
-    if (!routesByRef.has(ref)) {
-      routesByRef.set(ref, []);
+    console.log('Filtering out weekend-only trips...');
+    const weekendOnlyServiceIds = new Set(
+        calendar.filter(c => c.monday === '0' && c.tuesday === '0' && c.wednesday === '0' && c.thursday === '0' && c.friday === '0').map(c => c.service_id)
+    );
+    const tripsForProcessing = trips.filter(t => !weekendOnlyServiceIds.has(t.service_id));
+
+    console.log('Processing all lines and stops...');
+    const linesMap = new Map();
+    for (const route of routes) {
+        const ref = normalizeRef(route.route_short_name);
+        if (!ref) continue;
+
+        let shouldInclude = false;
+        let networkType = 'bus';
+        if (ref.startsWith('T') && route.route_type === '0') {
+            shouldInclude = true;
+            networkType = 'tram';
+        }
+        const numericRef = parseInt(ref.replace('Nomad ', ''), 10);
+        if (!isNaN(numericRef)) {
+            if ((numericRef >= 1 && numericRef <= 42) || (numericRef >= 100 && numericRef <= 138)) {
+                shouldInclude = true;
+            }
+        } else if (ref === 'NOCTIBUS' || ref === 'NAVETTE CAEN') {
+            shouldInclude = true;
+        }
+        // Exclude Nomad lines for now (distorted traces)
+        if (ref.startsWith('Nomad')) {
+            shouldInclude = false;
+        }
+        if (!shouldInclude) continue;
+
+        if (!linesMap.has(ref)) {
+            linesMap.set(ref, {
+                ref,
+                name: `Ligne ${ref}`,
+                network: networkType,
+                color_hex: `#${route.route_color}` || '#333333',
+                route_ids: new Set()
+            });
+        }
+        linesMap.get(ref).route_ids.add(route.route_id);
     }
-    routesByRef.get(ref).push(route);
-  }
-  
-  return { stops: uniqueEntries, routes: Array.from(routesByRef.entries()) };
+    
+    const shapesByShapeId = shapes.reduce((acc, shape) => {
+        if (!acc[shape.shape_id]) acc[shape.shape_id] = [];
+        acc[shape.shape_id].push({ lat: parseFloat(shape.shape_pt_lat), lon: parseFloat(shape.shape_pt_lon), seq: parseInt(shape.shape_pt_sequence, 10) });
+        return acc;
+    }, {});
+    
+    const tripsByRouteId = tripsForProcessing.reduce((acc, trip) => {
+        if (!acc[trip.route_id]) acc[trip.route_id] = [];
+        acc[trip.route_id].push(trip);
+        return acc;
+    }, {});
+
+    const stopTimesByTripId = stopTimes.reduce((acc, st) => {
+        if (!acc[st.trip_id]) acc[st.trip_id] = [];
+        acc[st.trip_id].push(st);
+        return acc;
+    }, {});
+
+    for (const line of linesMap.values()) {
+        if (osmGeoJsonMap.has(line.ref)) {
+            line.geojson = JSON.stringify(osmGeoJsonMap.get(line.ref));
+            continue;
+        }
+
+        const shapeIds = new Set();
+        for (const routeId of line.route_ids) {
+            (tripsByRouteId[routeId] || []).forEach(trip => {
+                if (trip.shape_id) shapeIds.add(trip.shape_id);
+            });
+        }
+
+        const uniqueLineStrings = new Set();
+        for (const shapeId of shapeIds) {
+            const points = shapesByShapeId[shapeId];
+            if (points && points.length > 1) {
+                points.sort((a, b) => a.seq - b.seq);
+                const lineString = points.map(p => [p.lon, p.lat]);
+                uniqueLineStrings.add(JSON.stringify(lineString));
+            }
+        }
+        
+        line.geojson = JSON.stringify({ type: 'MultiLineString', coordinates: Array.from(uniqueLineStrings).map(s => JSON.parse(s)) });
+    }
+
+    const lineStops = [];
+    for (const line of linesMap.values()) {
+        let longestTripStops = [];
+        for (const routeId of line.route_ids) {
+            for (const trip of (tripsByRouteId[routeId] || [])) {
+                const stopsForTrip = stopTimesByTripId[trip.trip_id] || [];
+                if (stopsForTrip.length > longestTripStops.length) {
+                    longestTripStops = stopsForTrip;
+                }
+            }
+        }
+        longestTripStops.sort((a, b) => parseInt(a.stop_sequence, 10) - parseInt(b.stop_sequence, 10));
+        longestTripStops.forEach(st => {
+            lineStops.push({
+                line_ref: line.ref,
+                stop_id: st.stop_id,
+                stop_sequence: parseInt(st.stop_sequence, 10)
+            });
+        });
+    }
+
+    return {
+        stops: stops.map(s => ({ id: s.stop_id, name: s.stop_name, lat: s.stop_lat, lon: s.stop_lon })),
+        lines: Array.from(linesMap.values()),
+        lineStops
+    };
 }
 
-function createDatabase(data) {
-  console.log('Creating final database with stops and lines tables...');
-  if (fs.existsSync(DB_PATH)) {
-    fs.unlinkSync(DB_PATH);
-  }
+function createDatabase({ stops, lines, lineStops }) {
+    console.log('Creating database...');
+    if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
 
-  const db = new sqlite3.Database(DB_PATH);
+    const db = new sqlite3.Database(DB_PATH);
 
-  db.serialize(() => {
-    // Create stops table with stop_group field
-    db.run(`CREATE TABLE stops (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      aliases TEXT,
-      lat REAL NOT NULL,
-      lon REAL NOT NULL,
-      line TEXT NOT NULL,
-      line_ref TEXT NOT NULL,
-      network TEXT NOT NULL,
-      operator TEXT NOT NULL,
-      stop_group INTEGER
-    )`);
+    db.serialize(() => {
+        db.run(`CREATE TABLE stops (id TEXT PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL)`);
+        const stopStmt = db.prepare(`INSERT INTO stops (id, name, lat, lon) VALUES (?, ?, ?, ?)`);
+        stops.forEach(s => stopStmt.run(s.id, s.name, s.lat, s.lon));
+        stopStmt.finalize();
+        console.log(`Inserted ${stops.length} stops.`);
 
-    // Create lines table
-    db.run(`CREATE TABLE lines (
-      id INTEGER PRIMARY KEY,
-      ref TEXT NOT NULL UNIQUE,
-      name TEXT NOT NULL,
-      color_hex TEXT NOT NULL,
-      network TEXT NOT NULL,
-      geojson TEXT
-    )`);
+        db.run(`CREATE TABLE lines (ref TEXT PRIMARY KEY, name TEXT NOT NULL, color_hex TEXT NOT NULL, network TEXT NOT NULL, geojson TEXT)`);
+        const lineStmt = db.prepare(`INSERT INTO lines (ref, name, color_hex, network, geojson) VALUES (?, ?, ?, ?, ?)`);
+        lines.forEach(l => lineStmt.run(l.ref, l.name, l.color_hex, l.network, l.geojson));
+        lineStmt.finalize();
+        console.log(`Inserted ${lines.length} lines.`);
 
-    // Insert stops
-    const stopStmt = db.prepare(`INSERT INTO stops (name, aliases, lat, lon, line, line_ref, network, operator, stop_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    db.run('BEGIN TRANSACTION');
-    for (const entry of data.stops) {
-      if (parseInt(entry.line.slice(0, 3)) >= 100) continue;
-      stopStmt.run(entry.name, entry.aliases, entry.lat, entry.lon, entry.line, entry.line_ref, entry.network, entry.operator, entry.stop_group);
-    }
-    db.run('COMMIT');
-    stopStmt.finalize();
+        db.run(`CREATE TABLE line_stops (line_ref TEXT NOT NULL, stop_id TEXT NOT NULL, stop_sequence INTEGER NOT NULL, PRIMARY KEY (line_ref, stop_sequence))`);
+        const seqStmt = db.prepare(`INSERT OR IGNORE INTO line_stops (line_ref, stop_id, stop_sequence) VALUES (?, ?, ?)`);
+        lineStops.forEach(ls => seqStmt.run(ls.line_ref, ls.stop_id, ls.stop_sequence));
+        seqStmt.finalize();
+        console.log(`Inserted stop sequences.`);
+    });
 
-    // Insert lines with official colors (extracted from PNG icons)
-    const lineColors = {
-      'T1': '#23A638',
-      'T2': '#E73132',
-      'T3': '#009ADF',
-      '1': '#D8005B',
-      '2': '#0975B8',
-      '3': '#C4CE10',
-      '4': '#DA609F',
-      '5': '#642580',
-      '6A': '#FCDD19',
-      '6B': '#FCDD19',
-      '7': '#8E5F2C',
-      '8': '#00804B',
-      '9': '#86BCE7',
-      '10': '#B0368C',
-      '10 EXPRESS': '#F29FC5',
-      '11': '#EA5B0C',
-      '11 EXPRESS': '#F39768',
-      '12': '#009D99',
-      '20': '#F59C00',
-      '21': '#153F8D',
-      '22': '#F3A3B9',
-      '23': '#E94861',
-      '30': '#D186B2',
-      '31': '#969328',
-      '32': '#82C491',
-      '34': '#7F2110',
-      '40': '#7D6FA5',
-      '42': '#7C6FA6',
-      '100': '#702283',
-      '101': '#702283',
-      '102': '#702283',
-      '103': '#702283',
-      '104': '#702283',
-      '107': '#702283',
-      '109': '#702283',
-      '110': '#702283',
-      '111': '#702283',
-      '112': '#702283',
-      '113': '#702283',
-      '114': '#702283',
-      '115': '#702283',
-      '116': '#702283',
-      '118': '#702283',
-      '119': '#702283',
-      '120': '#702283',
-      '121': '#702283',
-      '122': '#702283',
-      '123': '#702283',
-      '124': '#702283',
-      '125': '#702283',
-      '126': '#702283',
-      '127': '#702283',
-      '128': '#702283',
-      '130': '#702283',
-      '131': '#702283',
-      '133': '#702283',
-      '134': '#702283',
-      '135': '#702283',
-      '136': '#702283',
-      '137': '#702283',
-      '138': '#702283',
-      'NAVETTE CAEN': '#E84133',
-      'NOCTIBUS': '#011337'
-    };
-
-    const linesSet = new Map();
-    for (const [_, route] of data.routes) {
-      if (!route[0].tags || !route[0].tags.ref) continue;
-      if (parseInt(_) >= 100) continue;
-      const ref = route[0].tags.ref;
-      const network = getNetworkType(route[0].tags);
-      const betterName = route[0].tags.name.replace(/→.*→|→/, '-')
-      linesSet.set(ref, {
-        ref,
-        name: betterName || `Ligne ${ref}`,
-        color_hex: lineColors[ref] || '#333333',
-        network: network || 'bus'
-      });
-    }
-
-    const lineStmt = db.prepare(`INSERT INTO lines (ref, name, color_hex, network, geojson) VALUES (?, ?, ?, ?, ?)`);
-    db.run('BEGIN TRANSACTION');
-    for (const [ref, lineData] of linesSet) {
-      lineStmt.run(lineData.ref, lineData.name, lineData.color_hex, lineData.network, null);
-    }
-    db.run('COMMIT');
-    lineStmt.finalize();
-  });
-
-  db.close((err) => {
-    if (err) {
-      console.error(err.message);
-    }
-    console.log('Database created successfully at public/stops.sqlite');
-  });
+    db.close(err => {
+        if (err) return console.error('Error closing database:', err.message);
+        console.log(`Database created successfully at ${DB_PATH}`);
+    });
 }
 
 async function main() {
-  try {
-    const data = await fetchOverpassData();
-    const processedData = processData(data);
-    createDatabase(processedData);
-  } catch (error) {
-    console.error('An error occurred:', error);
-  }
+    try {
+        await downloadAndUnzipGTFS();
+        const data = await processData();
+        createDatabase(data);
+    } catch (error) {
+        console.error('An error occurred:', error);
+    } finally {
+        if (fs.existsSync(TEMP_GTFS_DIR)) {
+            fs.rmSync(TEMP_GTFS_DIR, { recursive: true, force: true });
+            console.log('Cleaned up temporary GTFS directory.');
+        }
+    }
 }
 
 main();

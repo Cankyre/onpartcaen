@@ -29,25 +29,13 @@ export function matchStops(guess, availableStops, levenshteinFn) {
   const normalizedGuess = normalizeString(guess);
   const matchedStopIds = new Set();
   
-  // Pass 1: Perfect match on name or aliases
+  // Pass 1: Perfect match on name
   const perfectMatches = availableStops.filter(s => {
-    const nameMatch = normalizeString(s.name) === normalizedGuess;
-    const aliasMatch = s.aliases.some(alias => normalizeString(alias) === normalizedGuess);
-    return nameMatch || aliasMatch;
+    return normalizeString(s.name) === normalizedGuess;
   });
   
   if (perfectMatches.length > 0) {
-    // Add all perfect matches
-    for (const stop of perfectMatches) {
-      matchedStopIds.add(stop.id);
-      
-      // If this stop has a stop_group, add all stops in that group
-      if (stop.stop_group) {
-        const groupStops = availableStops.filter(s => s.stop_group === stop.stop_group);
-        groupStops.forEach(gs => matchedStopIds.add(gs.id));
-      }
-    }
-    
+    perfectMatches.forEach(stop => matchedStopIds.add(stop.id));
     return Array.from(matchedStopIds);
   }
   
@@ -55,16 +43,12 @@ export function matchStops(guess, availableStops, levenshteinFn) {
   const candidates = [];
   
   for (const stop of availableStops) {
-    const allNames = [stop.name, ...stop.aliases];
-    for (const name of allNames) {
-      const normalizedName = normalizeString(name);
-      const dist = levenshteinFn(normalizedGuess, normalizedName);
-      const threshold = normalizedName.length > 8 ? 2 : 1;
-      
-      if (dist <= threshold) {
-        candidates.push({ stop, distance: dist });
-        break;
-      }
+    const normalizedName = normalizeString(stop.name);
+    const dist = levenshteinFn(normalizedGuess, normalizedName);
+    const threshold = normalizedName.length > 8 ? 2 : 1; // Levenshtein threshold
+    
+    if (dist <= threshold) {
+      candidates.push({ stop, distance: dist });
     }
   }
   
@@ -74,15 +58,7 @@ export function matchStops(guess, availableStops, levenshteinFn) {
   }
   
   if (candidates.length > 0) {
-    // Add all fuzzy matches and their groups
-    for (const { stop } of candidates) {
-      matchedStopIds.add(stop.id);
-      
-      if (stop.stop_group) {
-        const groupStops = availableStops.filter(s => s.stop_group === stop.stop_group);
-        groupStops.forEach(gs => matchedStopIds.add(gs.id));
-      }
-    }
+    candidates.forEach(({ stop }) => matchedStopIds.add(stop.id));
   }
   
   return Array.from(matchedStopIds);

@@ -1,13 +1,11 @@
 <script>
-// @ts-nocheck
+  import { getStoredData, storeData, exportFoundStops } from '../lib/storage.js';
+  import { getStopsForLine } from '../lib/db.js';
 
-  import App from '../App.svelte';
-import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib/storage.js';
-  
   export let foundStopIds = [];
-  export let allStops = [];
-  export let activeNetworks = [];
+  export let allStops = []; // Enriched with .networks and .lines Sets
   export let lines = [];
+  export let activeNetworks = [];
   export let hiddenLines = [];
   export let focusedLines = [];
   export let inFocusMode = false;
@@ -18,7 +16,6 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   let sortMode = 'chrono'; // 'chrono' | 'alpha' | 'by-line'
   let showAbout = false;
 
-  // Load/save sort mode
   $: {
     const stored = getStoredData('sideViewSortMode');
     if (stored) sortMode = stored;
@@ -29,133 +26,120 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
     storeData('sideViewSortMode', mode);
   }
 
-  const displayRefMap = { '6A': '6', '6B': '6' };
-
-  // Official line order for sorting
-  const lineOrder = ['T1', 'T2', 'T3', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '10 EXPRESS', '11', '11 EXPRESS', '12', '20', '21', '22', '23', '30', '31', '32', '34', '40', '42', 'NAVETTE CAEN', 'NOCTIBUS'];
+  // New categorical sorting function for lines
   function getLineOrder(ref) {
-    const idx = lineOrder.indexOf(ref);
-    return idx >= 0 ? idx : 999;
+    if (typeof ref !== 'string') return 9999;
+    const isTram = ref.startsWith('T');
+    const isNomad = ref.startsWith('Nomad');
+    const num = parseInt(ref.replace('Nomad ', ''), 10);
+
+    if (isTram) return 1000 + num;
+    if (isNomad) return 5000 + num;
+    if (!isNaN(num)) {
+      if (num < 100) return 2000 + num;
+      return 4000 + num;
+    }
+    return 3000; // Fallback for 'NOCTIBUS', etc.
+  }
+
+  // Determine line category for phases
+  function getLineCategory(ref) {
+    if (typeof ref !== 'string') return 'other';
+    if (ref.startsWith('T')) return 'tram';
+    const num = parseInt(ref, 10);
+    if (!isNaN(num) && num < 100) return 'regular';
+    return 'other'; // Complementary lines (100+, NOCTIBUS, etc.)
   }
 
   // Determine which lines are actually visible
   $: visibleLineRefs = (() => {
-    const allLineRefs = lines
-      .filter(line => activeNetworks.includes(line.network))
-      .reduce((acc, line) => {
-        const displayRef = displayRefMap[line.ref] || line.ref;
-        if (!acc.includes(displayRef)) acc.push(displayRef);
-        return acc;
-      }, []);
+    const activeAndLoadedLines = lines.filter(line => activeNetworks.includes(line.network)).map(line => line.ref);
     
     if (inFocusMode) {
-      return focusedLines;
+      return focusedLines.filter(ref => activeAndLoadedLines.includes(ref));
     } else {
-      return allLineRefs.filter(ref => !hiddenLines.includes(ref));
+      return activeAndLoadedLines.filter(ref => !hiddenLines.includes(ref));
     }
   })();
+
+  // Map of all stops for quick lookup
+  $: allStopsMap = new Map(allStops.map(s => [s.id, s]));
 
   // Build flat list of found stops with their lines
   $: flatStops = (() => {
     const foundSet = new Set(foundStopIds);
-    const activeStops = allStops.filter(s => 
-      activeNetworks.includes(s.network) && foundSet.has(s.id)
-    );
+    const stopDetails = new Map(); // Map: stop.id -> {id, name, lat, lon, lineRefs: Set<string>, firstFoundIndex}
+    
+    // For each visible line, get its stops
+    for (const lineRef of visibleLineRefs) {
+      const lineData = lines.find(l => l.ref === lineRef);
+      if (!lineData) continue;
 
-    // Build line color/icon map
-    const lineMap = new Map();
-    for (const line of lines) {
-      const displayRef = displayRefMap[line.ref] || line.ref;
-      if (!lineMap.has(displayRef)) {
-        lineMap.set(displayRef, { ref: displayRef, color: line.color_hex, icon: `/icons/${displayRef}.png`, network: line.network });
-      }
-    }
-
-    // Group stops by normalized name only, filtering by visible lines
-    const stopsMap = new Map();
-    for (const stop of activeStops) {
-      const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
+      // Use db.getStopsForLine to get ordered stops for this line
+      const stopsOnThisLine = getStopsForLine(lineRef); // This returns {id, name, lat, lon}
       
-      // Only include stops on visible lines
-      if (!visibleLineRefs.includes(displayRef)) continue;
-      
-      const key = stop.name.toLowerCase().trim();
-      if (!stopsMap.has(key)) {
-        const firstIdx = foundStopIds.indexOf(stop.id);
-        stopsMap.set(key, {
-          id: stop.id,
-          name: stop.name,
-          lat: stop.lat,
-          lon: stop.lon,
-          lineRefs: new Set(),
-          firstFoundIndex: firstIdx >= 0 ? firstIdx : 99999
-        });
-      }
-      const entry = stopsMap.get(key);
-      entry.lineRefs.add(displayRef);
-      // update firstFoundIndex to earliest
-      const idx = foundStopIds.indexOf(stop.id);
-      if (idx >= 0 && idx < entry.firstFoundIndex) entry.firstFoundIndex = idx;
-    }
-
-    const arr = Array.from(stopsMap.values()).map(s => ({
-      ...s,
-      lineRefs: Array.from(s.lineRefs).sort((a, b) => getLineOrder(a) - getLineOrder(b)),
-      lines: Array.from(s.lineRefs).map(r => lineMap.get(r)).filter(Boolean)
-    }));
-
-    // Sort
-    if (sortMode === 'chrono') {
-      arr.sort((a, b) => b.firstFoundIndex - a.firstFoundIndex); // recent first
-    } else if (sortMode === 'alpha') {
-      arr.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortMode === 'by-line') {
-      // Group all stops (found + not found) by line, then sort by stop ID (route order)
-      const lineStopsMap = new Map();
-      
-      // Get all stops for active networks, filtered by visible lines
-      const allActiveStops = allStops.filter(s => {
-        const displayRef = displayRefMap[s.line_ref] || s.line_ref;
-        return activeNetworks.includes(s.network) && visibleLineRefs.includes(displayRef);
-      });
-      
-      for (const stop of allActiveStops) {
-        const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
-        if (!lineStopsMap.has(displayRef)) {
-          lineStopsMap.set(displayRef, []);
-        }
-        
-        const normalizedName = stop.name.toLowerCase().trim();
-        // Check if already added this stop name for this line
-        const existing = lineStopsMap.get(displayRef).find(s => s.name.toLowerCase().trim() === normalizedName);
-        if (!existing) {
-          lineStopsMap.get(displayRef).push({
+      stopsOnThisLine.forEach(stop => {
+        if (!stopDetails.has(stop.id)) {
+          stopDetails.set(stop.id, {
             id: stop.id,
             name: stop.name,
             lat: stop.lat,
             lon: stop.lon,
-            found: foundSet.has(stop.id),
-            singleLine: lineMap.get(displayRef)
-          });
-        } else if (foundSet.has(stop.id)) {
-          existing.found = true;
-        }
-      }
-      
-      // Sort stops within each line by ID (route order), then flatten
-      const expanded = [];
-      for (const [lineRef, stops] of lineStopsMap.entries()) {
-        stops.sort((a, b) => a.id - b.id);
-        for (const stop of stops) {
-          expanded.push({
-            ...stop,
-            sortKey: `${getLineOrder(lineRef).toString().padStart(3, '0')}`
+            lineRefs: new Set(),
+            firstFoundIndex: foundSet.has(stop.id) ? foundStopIds.indexOf(stop.id) : Infinity // Initialize with actual index or infinity
           });
         }
-      }
+        stopDetails.get(stop.id).lineRefs.add(lineRef);
+      });
+    }
+
+    const arr = Array.from(stopDetails.values())
+      .filter(stop => foundSet.has(stop.id) || sortMode === 'by-line') // Only show found stops in chrono/alpha, show all in by-line
+      .map(s => ({
+      ...s,
+      lineRefs: Array.from(s.lineRefs).sort((a, b) => getLineOrder(a) - getLineOrder(b)),
+      lines: Array.from(s.lineRefs).map(ref => lines.find(l => l.ref === ref)).filter(Boolean), // Get full line objects
+      found: foundSet.has(s.id)
+    }));
+
+    // Sort
+    if (sortMode === 'chrono') {
+      arr.sort((a, b) => {
+        // Sort by firstFoundIndex (most recent found first), then by name
+        if (a.firstFoundIndex !== b.firstFoundIndex) {
+            return b.firstFoundIndex - a.firstFoundIndex;
+        }
+        return a.name.localeCompare(b.name);
+      });
+    } else if (sortMode === 'alpha') {
+      arr.sort((a, b) => a.name.localeCompare(b.name));
+    } else if (sortMode === 'by-line') {
+      // Group stops by line and maintain route order from database
+      const lineSortedStops = [];
+      const addedStops = new Set(); // Track stop_id + line_ref to avoid duplicates
       
-      expanded.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-      return expanded;
+      for (const lineRef of visibleLineRefs.sort((a, b) => getLineOrder(a) - getLineOrder(b))) {
+        const stopsOnCurrentLine = getStopsForLine(lineRef); // Already in route order from database
+        
+        stopsOnCurrentLine.forEach((stop, stopIndex) => {
+          const stopKey = `${stop.id}_${lineRef}`;
+          if (!addedStops.has(stopKey)) {
+            addedStops.add(stopKey);
+            lineSortedStops.push({
+              id: stop.id,
+              name: stop.name,
+              lat: stop.lat,
+              lon: stop.lon,
+              lineRefs: [lineRef],
+              lines: [lines.find(l => l.ref === lineRef)],
+              found: foundSet.has(stop.id),
+              singleLine: lines.find(l => l.ref === lineRef),
+              sortKey: `${getLineOrder(lineRef).toString().padStart(5, '0')}-${stopIndex.toString().padStart(5, '0')}`
+            });
+          }
+        });
+      }
+      return lineSortedStops;
     }
 
     return arr;
@@ -164,44 +148,103 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   // Trigger re-render when activeNetworks changes to update line icons
   $: activeNetworks, flatStops;
 
-  // Calculate total progress (dedupe by name only)
-  $: totalProgress = (() => {
+  // Calculate progress by phase (Tram, Regular Bus, Complementary)
+  $: phaseProgress = (() => {
     const foundSet = new Set(foundStopIds);
-    const activeStops = allStops.filter(s => activeNetworks.includes(s.network));
-    // dedupe by normalized name only
-    const unique = new Map();
-    for (const s of activeStops) {
-      const key = s.name.toLowerCase().trim();
-      if (!unique.has(key)) unique.set(key, { found: foundSet.has(s.id) });
-      else if (foundSet.has(s.id)) unique.get(key).found = true;
+    const phases = {
+      tram: { found: new Set(), total: new Set() },
+      regular: { found: new Set(), total: new Set() },
+      complementary: { found: new Set(), total: new Set() }
+    };
+    
+    for (const line of lines.filter(l => activeNetworks.includes(l.network))) {
+      const category = getLineCategory(line.ref);
+      const targetPhase = category === 'tram' ? 'tram' 
+                        : category === 'regular' ? 'regular' 
+                        : 'complementary'; // other (complementary)
+      
+      getStopsForLine(line.ref).forEach(s => {
+        phases[targetPhase].total.add(s.id);
+        if (foundSet.has(s.id)) {
+          phases[targetPhase].found.add(s.id);
+        }
+      });
     }
-    const total = unique.size;
-    const found = Array.from(unique.values()).filter(u => u.found).length;
-    return { found, total, percent: total > 0 ? Math.round((found / total) * 100) : 0 };
+
+    return {
+      tram: { 
+        found: phases.tram.found.size, 
+        total: phases.tram.total.size,
+        percent: phases.tram.total.size > 0 ? Math.round((phases.tram.found.size / phases.tram.total.size) * 100) : 0
+      },
+      regular: { 
+        found: phases.regular.found.size, 
+        total: phases.regular.total.size,
+        percent: phases.regular.total.size > 0 ? Math.round((phases.regular.found.size / phases.regular.total.size) * 100) : 0
+      },
+      complementary: { 
+        found: phases.complementary.found.size, 
+        total: phases.complementary.total.size,
+        percent: phases.complementary.total.size > 0 ? Math.round((phases.complementary.found.size / phases.complementary.total.size) * 100) : 0
+      }
+    };
   })();
+
+  // Calculate total progress and current phase
+  $: totalProgress = (() => {
+    const totalFound = phaseProgress.tram.found + phaseProgress.regular.found + phaseProgress.complementary.found;
+    const totalStops = phaseProgress.tram.total + phaseProgress.regular.total + phaseProgress.complementary.total;
+    
+    // Determine current phase: complete previous phases to unlock next
+    let currentPhase = 1;
+    let currentFound = phaseProgress.tram.found;
+    let currentTotal = phaseProgress.tram.total;
+    let currentPercent = phaseProgress.tram.percent;
+    
+    if (phaseProgress.tram.found >= phaseProgress.tram.total && phaseProgress.tram.total > 0) {
+      currentPhase = 2;
+      currentFound = phaseProgress.regular.found;
+      currentTotal = phaseProgress.regular.total;
+      currentPercent = phaseProgress.regular.percent;
+      
+      if (phaseProgress.regular.found >= phaseProgress.regular.total && phaseProgress.regular.total > 0) {
+        currentPhase = 3;
+        currentFound = phaseProgress.complementary.found;
+        currentTotal = phaseProgress.complementary.total;
+        currentPercent = phaseProgress.complementary.percent;
+      }
+    }
+    
+    return { 
+      found: totalFound, 
+      total: totalStops, 
+      percent: totalStops > 0 ? Math.round((totalFound / totalStops) * 100) : 0,
+      currentPhase,
+      currentFound,
+      currentTotal,
+      currentPercent
+    };
+  })();
+
 
   // Calculate completed lines (all stops found)
   $: completedLines = (() => {
     const foundSet = new Set(foundStopIds);
-    const activeStops = allStops.filter(s => activeNetworks.includes(s.network));
-    const lineStopsMap = new Map();
-    
-    for (const stop of activeStops) {
-      const displayRef = displayRefMap[stop.line_ref] || stop.line_ref;
-      if (!lineStopsMap.has(displayRef)) {
-        lineStopsMap.set(displayRef, { total: new Set(), found: new Set() });
-      }
-      const normalizedName = stop.name.toLowerCase().trim();
-      lineStopsMap.get(displayRef).total.add(normalizedName);
-      if (foundSet.has(stop.id)) {
-        lineStopsMap.get(displayRef).found.add(normalizedName);
-      }
-    }
-    
     const completed = [];
-    for (const [lineRef, stats] of lineStopsMap.entries()) {
-      if (stats.total.size > 0 && stats.found.size === stats.total.size) {
-        completed.push(lineRef);
+    
+    for (const line of lines.filter(l => activeNetworks.includes(l.network))) {
+      const stopsOnLine = getStopsForLine(line.ref);
+      if (stopsOnLine.length === 0) continue; // Line with no stops isn't completable
+
+      let allStopsFoundOnLine = true;
+      for (const stop of stopsOnLine) {
+        if (!foundSet.has(stop.id)) {
+          allStopsFoundOnLine = false;
+          break;
+        }
+      }
+      if (allStopsFoundOnLine) {
+        completed.push(line.ref);
       }
     }
     return completed;
@@ -273,15 +316,17 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
           <path
             d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
             fill="none"
-            stroke="#4CAF50"
+            stroke="{totalProgress.currentPhase === 1 ? '#23A638' : totalProgress.currentPhase === 2 ? '#EF3C3C' : '#0096DD'}"
             stroke-width="3"
-            stroke-dasharray="{totalProgress.percent}, 100"
+            stroke-dasharray="{totalProgress.currentPercent}, 100"
           />
-          <text x="18" y="21" text-anchor="middle" font-size="10" font-weight="bold">{totalProgress.percent}%</text>
+          <text x="18" y="21" text-anchor="middle" font-size="10" font-weight="bold">{totalProgress.currentPercent}%</text>
         </svg>
       </div>
       <div class="progress-text">
-        Phase {totalProgress.total <= 37 ? '1' : '2'}: <strong>{totalProgress.found}</strong> / {totalProgress.total}
+        Phase {totalProgress.currentPhase}/3 
+        {#if totalProgress.currentPhase === 1}(Tram){:else if totalProgress.currentPhase === 2}(Bus){:else}(Complémentaire){/if}: 
+        <strong>{totalProgress.currentFound}</strong> / {totalProgress.currentTotal}
       </div>
     </div>
     <div class="actions">
@@ -301,7 +346,7 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
         <p><strong>On Part Caen ?</strong></p>
         <p>Un jeu développé par <a href="mailto:cankyre@caen.lol">Cankyre</a>.</p>
         <p>Cette application n'est en aucun cas affiliée à <em>Twisto</em> ou <em>RATP Dev</em>.</p>
-        <p><strong>Données :</strong> OpenStreetMap via Overpass API</p>
+        <p><strong>Données :</strong> GTFS (General Transit Feed Specification) officiel de Twisto.</p>
         <p>Fortement inspiré par <a href="https://memory.pour.paris">Memory Pour Paris</a>. Merci.</p>
         <p style="font-size: 2pt">Dédicace à Fabetsol, l'arrêt Guynemer (y'a rien), et à la ligne 33, paix à son âme.</p>
         <button on:click={toggleAbout}>Fermer</button>
@@ -312,13 +357,7 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   <div class="line-filters">
     <h3>Lignes visibles</h3>
     <div class="line-filter-grid">
-      {#each lines.filter(line => activeNetworks.includes(line.network)).reduce((acc, line) => {
-        const displayRef = displayRefMap[line.ref] || line.ref;
-        if (!acc.find(l => l.ref === displayRef)) {
-          acc.push({ ref: displayRef, color: line.color_hex, icon: `/icons/${displayRef}.png` });
-        }
-        return acc;
-      }, []).sort((a, b) => getLineOrder(a.ref) - getLineOrder(b.ref)) as line}
+      {#each lines.filter(line => activeNetworks.includes(line.network)).sort((a, b) => getLineOrder(a.ref) - getLineOrder(b.ref)) as line}
         <button 
           class="line-filter-btn" 
           class:hidden={hiddenLines.includes(line.ref)}
@@ -326,9 +365,9 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
           on:click={(e) => handleLineClick(line.ref, e)}
           title="{inFocusMode && focusedLines.includes(line.ref) ? 'Shift+Clic pour tout afficher' : 'Clic: masquer/afficher | Shift+Clic: isoler'}"
         >
-          <img src={line.icon} alt="Ligne {line.ref}" on:error={(e) => e.target.style.display = 'none'} />
+          <img src="/icons/{line.ref}.png" alt="Ligne {line.ref}" on:error={(e) => e.target.style.display = 'none'} />
           {#if hiddenLines.includes(line.ref)}
-            <span class="eye-slash">👁️‍🗨️</span>
+            <span class="eye-slash">👁️</span>
           {/if}
           {#if completedLines.includes(line.ref)}
             <span class="crown">👑</span>
@@ -364,10 +403,10 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
           {/if}
             <div class="line-icons">
               {#if sortMode === 'by-line' && stop.singleLine}
-                <img src={stop.singleLine.icon} alt="Ligne {stop.singleLine.ref}" class="line-icon-small" on:error={(e) => e.target.style.display = 'none'} />
+                <img src="/icons/{stop.singleLine.ref}.png" alt="Ligne {stop.singleLine.ref}" class="line-icon-small" on:error={(e) => e.target.style.display = 'none'} />
               {:else}
-                {#each stop.lines.sort((a,b) => lineOrder.indexOf(a.ref) > lineOrder.indexOf(b.ref)) as line, i}
-                  <img src={line.icon} alt="Ligne {line.ref}" class="line-icon-small" style="z-index: {stop.lines.length - i}; margin-left: {i > 0 ? '-8px' : '0'};" on:error={(e) => e.target.style.display = 'none'} />
+                {#each stop.lines.sort((a,b) => getLineOrder(a.ref) - getLineOrder(b.ref)) as line, i}
+                  <img src="/icons/{line.ref}.png" alt="Ligne {line.ref}" class="line-icon-small" style="z-index: {stop.lines.length - i}; margin-left: {i > 0 ? '-8px' : '0'};" on:error={(e) => e.target.style.display = 'none'} />
                 {/each}
               {/if}
             </div>
@@ -673,3 +712,4 @@ import { getStoredData, storeData, exportFoundStops, clearAllData } from '../lib
   }
 
 </style>
+

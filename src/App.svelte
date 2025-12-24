@@ -3,25 +3,29 @@
   import MapView from './components/MapView.svelte';
   import SideView from './components/SideView.svelte';
   import GuessInput from './components/GuessInput.svelte';
-  import { loadDb, getAllStops, getActiveStops, getLines, getStopById } from './lib/db.js';
-  import { getStoredData, storeData, clearAllData } from './lib/storage.js';
+  import { loadDb, getAllStops, getLines, getStopsForLine } from './lib/db.js';
+  import { getStoredData, storeData } from './lib/storage.js';
   import { getActiveNetworks } from './lib/progression.js';
   import { matchStops } from './lib/search.js';
   import { levenshtein } from './lib/distance.js';
 
-  let allStops = [];
+  let allStops = []; // This will become the enriched list of stops
   let lines = [];
   let foundStopIds = [];
   let activeNetworks = [];
   let hiddenLines = [];
-  let focusedLines = []; // Lines visible in focus mode
-  let hiddenLinesBeforeFocus = []; // Hidden lines before entering focus mode
+  let focusedLines = [];
+  let hiddenLinesBeforeFocus = [];
   let inFocusMode = false;
   let loading = true;
+  let devMode = false;
   let mapViewRef;
   let guessInputRef;
 
   onMount(async () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    devMode = urlParams.has('dev');
+
     const storedFoundStopIds = getStoredData('foundStopIds');
     if (storedFoundStopIds && Array.isArray(storedFoundStopIds)) {
       foundStopIds = storedFoundStopIds;
@@ -30,29 +34,54 @@
     if (storedHiddenLines && Array.isArray(storedHiddenLines)) {
       hiddenLines = storedHiddenLines;
     }
+    
     await loadAndProcessDb();
     
-    // Update found stops to include all lines at matching stop names when phase changes
-    updateFoundStopsForPhase();
+    if (!devMode) {
+      updateFoundStopsForPhase();
+    }
     
     loading = false;
   });
 
   async function loadAndProcessDb() {
     await loadDb();
-    allStops = getAllStops();
+    const basicStops = getAllStops();
     lines = getLines();
-    activeNetworks = getActiveNetworks(foundStopIds, allStops);
+
+    // Pre-process stops to map them to their lines and networks for efficient access
+    const stopDetailsMap = new Map();
+    for (const line of lines) {
+      const stopsOnLine = getStopsForLine(line.ref);
+      for (const stop of stopsOnLine) {
+        if (!stopDetailsMap.has(stop.id)) {
+          stopDetailsMap.set(stop.id, { networks: new Set(), lines: new Set() });
+        }
+        const details = stopDetailsMap.get(stop.id);
+        details.networks.add(line.network);
+        details.lines.add(line.ref);
+      }
+    }
+
+    // Enrich the main allStops array
+    allStops = basicStops.map(stop => ({
+      ...stop,
+      ...(stopDetailsMap.get(stop.id) || { networks: new Set(), lines: new Set() })
+    }));
+
+    if (devMode) {
+      activeNetworks = ['tram', 'bus'];
+    } else {
+      activeNetworks = getActiveNetworks(foundStopIds, lines);
+    }
   }
 
-  // Update found stops to include all active network stops at the same location
   function updateFoundStopsForPhase() {
-    if (foundStopIds.length === 0) return;
+    if (foundStopIds.length === 0 || devMode) return;
     
     const foundSet = new Set(foundStopIds);
     const foundStopNames = new Set();
     
-    // Collect all found stop names (normalized)
     for (const stopId of foundStopIds) {
       const stop = allStops.find(s => s.id === stopId);
       if (stop) {
@@ -60,10 +89,9 @@
       }
     }
     
-    // Find all stops in active networks matching found names
     const newFoundIds = [];
     for (const stop of allStops) {
-      if (activeNetworks.includes(stop.network)) {
+      if (Array.from(stop.networks).some(n => activeNetworks.includes(n))) {
         const normalizedName = stop.name.toLowerCase().trim();
         if (foundStopNames.has(normalizedName) && !foundSet.has(stop.id)) {
           newFoundIds.push(stop.id);
@@ -81,7 +109,7 @@
     const { guess } = event.detail;
 
     const availableStops = allStops.filter(s => 
-      activeNetworks.includes(s.network) && !foundStopIds.includes(s.id)
+      Array.from(s.networks).some(n => activeNetworks.includes(n)) && !foundStopIds.includes(s.id)
     );
 
     const matchedIds = matchStops(guess, availableStops, levenshtein);
@@ -91,22 +119,22 @@
       return;
     }
 
-    // Update found stops
     foundStopIds = [...foundStopIds, ...matchedIds];
-    const previousActiveNetworks = [...activeNetworks];
-    activeNetworks = getActiveNetworks(foundStopIds, allStops);
     
-    // If phase changed, update all previously found stops
-    if (previousActiveNetworks.length !== activeNetworks.length) {
-      updateFoundStopsForPhase();
+    if (!devMode) {
+      const previousActiveNetworks = [...activeNetworks];
+      activeNetworks = getActiveNetworks(foundStopIds, lines);
+      if (previousActiveNetworks.length !== activeNetworks.length) {
+        updateFoundStopsForPhase();
+      }
     }
     
     storeData('foundStopIds', foundStopIds);
 
-    // Show feedback
     const count = matchedIds.length;
+    const firstStopName = allStops.find(s => s.id === matchedIds[0])?.name || '';
     guessInputRef?.showFeedback(
-      `${count} arrêt${count > 1 ? 's' : ''} trouvé${count > 1 ? 's' : ''} !`,
+      count > 1 ? `${count} arrêts trouvés !` : `Arrêt "${firstStopName}" trouvé !`,
       'success'
     );
   }
@@ -117,77 +145,59 @@
 
   function handleClearProgress() {
     foundStopIds = [];
-    activeNetworks = getActiveNetworks([], allStops);
+    if (!devMode) {
+      activeNetworks = getActiveNetworks([], lines);
+    }
     storeData('foundStopIds', []);
-    // Note: clearAllData supprime aussi expandedLines et sortModes
-    // Pour éviter de tout perdre, on stocke juste foundStopIds vide
   }
 
   function handleToggleLine(lineRef, shiftKey = false) {
-    const displayRefMap = { '6A': '6', '6B': '6' };
-    
     if (shiftKey) {
-      // Shift-click behavior
       if (inFocusMode && focusedLines.includes(lineRef)) {
-        // Shift-click on a focused line: exit focus mode
         inFocusMode = false;
         hiddenLines = [...hiddenLinesBeforeFocus];
         focusedLines = [];
         hiddenLinesBeforeFocus = [];
       } else {
-        // Shift-click on non-focused line: enter/change focus mode
         const allLineRefs = lines
           .filter(line => activeNetworks.includes(line.network))
-          .reduce((acc, line) => {
-            const displayRef = displayRefMap[line.ref] || line.ref;
-            if (!acc.includes(displayRef)) acc.push(displayRef);
-            return acc;
-          }, []);
+          .map(line => line.ref);
         
         if (!inFocusMode) {
-          // Entering focus mode: save current hidden lines
           hiddenLinesBeforeFocus = [...hiddenLines];
         }
         
         inFocusMode = true;
         focusedLines = [lineRef];
-        // Hide all lines except the focused one
         hiddenLines = allLineRefs.filter(ref => ref !== lineRef);
       }
     } else {
       if (hiddenLines.includes(lineRef)) {
         hiddenLines = hiddenLines.filter(l => l !== lineRef);
         if (inFocusMode && !focusedLines.includes(lineRef)) {
-          // showing a line in focus mode -> include in focusedLines
           focusedLines = [...focusedLines, lineRef];
         }
       } else {
         hiddenLines = [...hiddenLines, lineRef];
         if (inFocusMode) {
-          // hiding a line in focus mode -> remove from focusedLines
           focusedLines = focusedLines.filter(l => l !== lineRef);
         }
       }
     }
 
-    // Ensure focused lines are always visible (not present in hiddenLines)
     if (focusedLines.length > 0) {
       hiddenLines = hiddenLines.filter(h => !focusedLines.includes(h));
     }
 
-    // If not in focus mode, clear focusedLines
     if (!inFocusMode) {
       focusedLines = [];
     }
 
     storeData('hiddenLines', hiddenLines);
-    // Force immediate map update to avoid races when toggling rapidly
     if (mapViewRef) {
       mapViewRef.setHiddenLines(hiddenLines);
     }
   }
-
-  const displayRefMap = { '6A': '6', '6B': '6' };
 </script>
 
 <main>

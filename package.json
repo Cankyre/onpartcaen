@@ -20,7 +20,9 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "better-sqlite3": "^12.5.0",
+    "csv-parse": "^6.1.0",
     "maplibre-gl": "^5.15.0",
     "sql.js": "^1.13.0"
   }
