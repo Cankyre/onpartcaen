@@ -1,11 +1,13 @@
 <script>
   import { getStoredData, storeData, exportFoundStops } from '../lib/storage.js';
   import { getStopsForLine } from '../lib/db.js';
+  import { getLineCategory } from '../lib/progression.js';
 
   export let foundStopIds = [];
   export let allStops = []; // Enriched with .networks and .lines Sets
   export let lines = [];
   export let activeNetworks = [];
+  export let activeLineCategories = [];
   export let hiddenLines = [];
   export let focusedLines = [];
   export let inFocusMode = false;
@@ -42,18 +44,15 @@
     return 3000; // Fallback for 'NOCTIBUS', etc.
   }
 
-  // Determine line category for phases
-  function getLineCategory(ref) {
-    if (typeof ref !== 'string') return 'other';
-    if (ref.startsWith('T')) return 'tram';
-    const num = parseInt(ref, 10);
-    if (!isNaN(num) && num < 100) return 'regular';
-    return 'other'; // Complementary lines (100+, NOCTIBUS, etc.)
-  }
-
-  // Determine which lines are actually visible
+  // Determine which lines are actually visible (network AND category)
   $: visibleLineRefs = (() => {
-    const activeAndLoadedLines = lines.filter(line => activeNetworks.includes(line.network)).map(line => line.ref);
+    const activeAndLoadedLines = lines
+      .filter(line => {
+        const inNetwork = activeNetworks.includes(line.network);
+        const inCategory = activeLineCategories.includes(getLineCategory(line.ref));
+        return inNetwork && inCategory;
+      })
+      .map(line => line.ref);
     
     if (inFocusMode) {
       return focusedLines.filter(ref => activeAndLoadedLines.includes(ref));
@@ -149,6 +148,7 @@
   $: activeNetworks, flatStops;
 
   // Calculate progress by phase (Tram, Regular Bus, Complementary)
+  // Note: Only count stops for ALL lines of each category, not just activeNetworks
   $: phaseProgress = (() => {
     const foundSet = new Set(foundStopIds);
     const phases = {
@@ -157,11 +157,12 @@
       complementary: { found: new Set(), total: new Set() }
     };
     
-    for (const line of lines.filter(l => activeNetworks.includes(l.network))) {
+    // Count ALL lines in each category, regardless of activeNetworks
+    for (const line of lines) {
       const category = getLineCategory(line.ref);
       const targetPhase = category === 'tram' ? 'tram' 
                         : category === 'regular' ? 'regular' 
-                        : 'complementary'; // other (complementary)
+                        : 'complementary';
       
       getStopsForLine(line.ref).forEach(s => {
         phases[targetPhase].total.add(s.id);
@@ -195,19 +196,23 @@
     const totalFound = phaseProgress.tram.found + phaseProgress.regular.found + phaseProgress.complementary.found;
     const totalStops = phaseProgress.tram.total + phaseProgress.regular.total + phaseProgress.complementary.total;
     
-    // Determine current phase: complete previous phases to unlock next
+    // Determine current phase based on progression thresholds
     let currentPhase = 1;
     let currentFound = phaseProgress.tram.found;
     let currentTotal = phaseProgress.tram.total;
     let currentPercent = phaseProgress.tram.percent;
     
-    if (phaseProgress.tram.found >= phaseProgress.tram.total && phaseProgress.tram.total > 0) {
+    // Phase 1 -> Phase 2 at 50% of tram
+    const tramThreshold = 0.5;
+    if (phaseProgress.tram.total > 0 && (phaseProgress.tram.found / phaseProgress.tram.total) >= tramThreshold) {
       currentPhase = 2;
       currentFound = phaseProgress.regular.found;
       currentTotal = phaseProgress.regular.total;
       currentPercent = phaseProgress.regular.percent;
       
-      if (phaseProgress.regular.found >= phaseProgress.regular.total && phaseProgress.regular.total > 0) {
+      // Phase 2 -> Phase 3 at 33% of regular network (tram + regular bus)
+      const regularThreshold = 0.33;
+      if (phaseProgress.regular.total > 0 && (phaseProgress.regular.found / phaseProgress.regular.total) >= regularThreshold) {
         currentPhase = 3;
         currentFound = phaseProgress.complementary.found;
         currentTotal = phaseProgress.complementary.total;
@@ -232,7 +237,11 @@
     const foundSet = new Set(foundStopIds);
     const completed = [];
     
-    for (const line of lines.filter(l => activeNetworks.includes(l.network))) {
+    for (const line of lines.filter(l => {
+      const inNetwork = activeNetworks.includes(l.network);
+      const inCategory = activeLineCategories.includes(getLineCategory(l.ref));
+      return inNetwork && inCategory;
+    })) {
       const stopsOnLine = getStopsForLine(line.ref);
       if (stopsOnLine.length === 0) continue; // Line with no stops isn't completable
 
@@ -357,7 +366,11 @@
   <div class="line-filters">
     <h3>Lignes visibles</h3>
     <div class="line-filter-grid">
-      {#each lines.filter(line => activeNetworks.includes(line.network)).sort((a, b) => getLineOrder(a.ref) - getLineOrder(b.ref)) as line}
+      {#each lines.filter(line => {
+        const inNetwork = activeNetworks.includes(line.network);
+        const inCategory = activeLineCategories.includes(getLineCategory(line.ref));
+        return inNetwork && inCategory;
+      }).sort((a, b) => getLineOrder(a.ref) - getLineOrder(b.ref)) as line}
         <button 
           class="line-filter-btn" 
           class:hidden={hiddenLines.includes(line.ref)}

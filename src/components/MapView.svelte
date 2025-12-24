@@ -2,11 +2,13 @@
   import { onMount, afterUpdate } from 'svelte';
   import maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
+  import { getLineCategory } from '../lib/progression.js';
 
   export let foundStopIds = [];
   export let allStops = []; // Enriched with .networks and .lines Sets
   export let lines = [];
   export let activeNetworks = [];
+  export let activeLineCategories = [];
   export let hiddenLines = [];
 
   let mapContainer;
@@ -41,7 +43,7 @@
       zoom: 12,
     });
 
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
+    map.addControl(new maplibregl.NavigationControl(), 'top-left');
 
     map.on('load', () => {
       initializeLayers();
@@ -92,10 +94,25 @@
     updateStopsOnMap();
   }
 
+  function getLineOrder(ref) {
+    if (typeof ref !== 'string') return 9999;
+    const isTram = ref.startsWith('T');
+    const num = parseInt(ref.replace('Nomad ', ''), 10);
+    if (isTram) return 1000 + num;
+    if (!isNaN(num)) {
+      if (num < 100) return 2000 + num;
+      return 4000 + num;
+    }
+    return 3000;
+  }
+
   function addOrUpdateLines() {
     if (!lines) return;
     
-    lines.forEach(line => {
+    // Sort lines by order (138 first, T1 last) so T1 is drawn on top
+    const sortedLines = [...lines].sort((a, b) => getLineOrder(b.ref) - getLineOrder(a.ref));
+    
+    sortedLines.forEach(line => {
       const sourceId = `line-${line.ref}`;
       const layerId = `line-layer-${line.ref}`;
       
@@ -115,7 +132,9 @@
 
       // 2. Always update visibility
       if (map.getLayer(layerId)) {
-        const isVisible = activeNetworks.includes(line.network) && !hiddenLines.includes(line.ref);
+        const inNetwork = activeNetworks.includes(line.network);
+        const inCategory = activeLineCategories.includes(getLineCategory(line.ref));
+        const isVisible = inNetwork && inCategory && !hiddenLines.includes(line.ref);
         map.setLayoutProperty(layerId, 'visibility', isVisible ? 'visible' : 'none');
       }
     });
@@ -128,7 +147,10 @@
       const stopLines = stop.lines ? Array.from(stop.lines) : [];
       const activeVisibleLines = stopLines.filter(lineRef => {
         const line = lines.find(l => l.ref === lineRef);
-        return line && activeNetworks.includes(line.network) && !hiddenLines.includes(line.ref);
+        if (!line) return false;
+        const inNetwork = activeNetworks.includes(line.network);
+        const inCategory = activeLineCategories.includes(getLineCategory(line.ref));
+        return inNetwork && inCategory && !hiddenLines.includes(line.ref);
       });
 
       const isVisible = activeVisibleLines.length > 0;
